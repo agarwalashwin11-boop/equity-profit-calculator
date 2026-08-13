@@ -1,8 +1,81 @@
 from flask import Flask, render_template_string, request
+import threading
+import time
+import feedparser
 
 app = Flask(__name__)
 
-# ---- Charges & Rates (from your sheet) ----
+# -----------------------------
+# 1. NSE RSS FEEDS (Background)
+# -----------------------------
+NSE_FEEDS = {
+    "Corporate Announcements": "https://nsearchives.nseindia.com/content/RSS/CorporateAnnouncement.xml",
+    "Corporate Actions": "https://nsearchives.nseindia.com/content/RSS/CorporateActions.xml",
+    "Board Meetings": "https://nsearchives.nseindia.com/content/RSS/BoardMeetings.xml",
+    "Financial Results": "https://nsearchives.nseindia.com/content/RSS/FinancialResults.xml",
+    "Insider Trading": "https://nsearchives.nseindia.com/content/RSS/InsiderTrading.xml",
+}
+
+LATEST_UPDATES = []
+SEEN_GUIDS = set()
+
+def poll_nse_feeds():
+    while True:
+        for category, url in NSE_FEEDS.items():
+            feed = feedparser.parse(url)
+            for entry in feed.entries:
+                guid = entry.get("id") or entry.get("link")
+                if guid not in SEEN_GUIDS:
+                    SEEN_GUIDS.add(guid)
+                    update = {
+                        "category": category,
+                        "title": entry.get("title", ""),
+                        "link": entry.get("link", "")
+                    }
+                    LATEST_UPDATES.append(update)
+
+                    # 🔔 HOOK: Send Telegram/WhatsApp alert here
+                    send_alert(update)
+
+        time.sleep(60)
+
+# Start background thread
+threading.Thread(target=poll_nse_feeds, daemon=True).start()
+
+
+# -----------------------------
+# 2. TELEGRAM / WHATSAPP ALERTS
+# -----------------------------
+def send_alert(update):
+    """
+    This function is intentionally left simple.
+    You will plug in your Telegram/WhatsApp API here.
+    """
+    message = f"🔔 NSE Update\n{update['category']}: {update['title']}\n{update['link']}"
+
+    # ---- TELEGRAM EXAMPLE (requires your bot token) ----
+    # import requests
+    # TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+    # CHAT_ID = "YOUR_CHAT_ID"
+    # url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    # requests.post(url, data={"chat_id": CHAT_ID, "text": message})
+
+    # ---- WHATSAPP EXAMPLE (requires official API) ----
+    # from twilio.rest import Client
+    # client = Client("TWILIO_SID", "TWILIO_AUTH")
+    # client.messages.create(
+    #     body=message,
+    #     from_="whatsapp:+14155238886",
+    #     to="whatsapp:+91XXXXXXXXXX"
+    # )
+
+    # For now, we just print:
+    print("Alert:", message)
+
+
+# -----------------------------
+# 3. YOUR ORIGINAL CALCULATOR
+# -----------------------------
 RATES = {
     "KOTAK_DELIVERY": {
         "brokerage_per_leg": 1e-3,
@@ -29,6 +102,19 @@ RATES = {
 HTML = """
 <!doctype html>
 <title>Equity Profit Calculator</title>
+
+{% if updates %}
+<div style="background:#fff8d6; padding:10px; border:1px solid #e6c200;">
+  <h3>🔔 Latest NSE Updates</h3>
+  <ul>
+    {% for u in updates %}
+      <li><b>{{ u.category }}:</b> 
+      <a href="{{ u.link }}" target="_blank">{{ u.title }}</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 <h2>Equity Trade – Net Profit Calculator</h2>
 <form method="post">
   <label>Broker:</label>
@@ -73,28 +159,22 @@ def calc_trade(broker_key, qty, buy_price, sell_price, interest_cost):
     sale_value = qty * sell_price
     gross_pl = sale_value - purchase_value
 
-    # Brokerage
     buy_brokerage = purchase_value * r["brokerage_per_leg"]
     sell_brokerage = sale_value * r["brokerage_per_leg"]
 
-    # STT
     stt_buy = purchase_value * r["stt_buy"]
     stt_sell = sale_value * r["stt_sell"]
 
-    # Stamp duty (only on buy)
     stamp_duty = purchase_value * r["stamp_buy"]
 
-    # Exchange + SEBI (both legs)
     exch_buy = purchase_value * r["exchange_txn"]
     exch_sell = sale_value * r["exchange_txn"]
     sebi_buy = purchase_value * r["sebi"]
     sebi_sell = sale_value * r["sebi"]
 
-    # GST on brokerage + exchange + sebi
     gst_base = buy_brokerage + sell_brokerage + exch_buy + exch_sell + sebi_buy + sebi_sell
     gst = gst_base * r["gst"]
 
-    # DP charges (delivery)
     dp = r["dp_charges"]
 
     total_charges = (
@@ -110,10 +190,6 @@ def calc_trade(broker_key, qty, buy_price, sell_price, interest_cost):
     net_pl = gross_pl - total_charges - interest_cost
     net_return_pct = (net_pl / purchase_value * 100) if purchase_value != 0 else 0
 
-    # Break-even sale price: sale price where net_pl = 0
-    # Let S = break-even sale price:
-    # Net P/L = (S*qty - purchase_value) - charges(S) - interest = 0
-    # Approximate by ignoring STT_sell dependence on S for simplicity:
     break_even_price = (purchase_value + total_charges + interest_cost) / qty
 
     return {
@@ -139,7 +215,7 @@ def index():
 
         result = calc_trade(broker, qty, buy_price, sell_price, interest)
 
-    return render_template_string(HTML, result=result)
+    return render_template_string(HTML, result=result, updates=LATEST_UPDATES[-10:])
 
 if __name__ == "__main__":
     app.run(debug=True)
